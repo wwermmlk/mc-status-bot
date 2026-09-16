@@ -1,0 +1,19 @@
+# /etc/systemd/system/mc-status-bot.service 로 복사한 뒤
+# User / WorkingDirectory / ExecStart 경로를 실제 환경에 맞게 수정하세요.
+[Unit]
+Description=Minecraft Status Discord Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/mc-status-bot
+ExecStart=/home/ubuntu/mc-status-bot/venv/bin/python bot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
