@@ -47,7 +47,9 @@ LOG_MASK_IPS = os.getenv("LOG_MASK_IPS", "true").strip().lower() != "false"
 LOG_FLUSH_SECONDS = max(1.0, float(os.getenv("LOG_FLUSH_SECONDS", "2")))
 
 WEBHOOK_NAME = "MC Chat Bridge"
-AVATAR_URL = "https://mc-heads.net/avatar/{name}/64"
+# 채팅 웹훅에 쓸 플레이어 얼굴 이미지. {name} 이 플레이어 이름으로 바뀐다.
+# mc-heads.net 은 Mojang에 스킨이 정상 등록된 일부 정품 계정도 스티브 얼굴로 돌려줘서 minotar 를 기본으로 쓴다.
+AVATAR_URL = os.getenv("AVATAR_URL", "").strip() or "https://minotar.net/helm/{name}/64.png"
 # 디스코드 메시지 2000자 제한 - 코드블록 기호 여유분
 LOG_MESSAGE_LIMIT = 1900
 # Forge는 시작할 때 수천 줄을 쏟아낸다. 이보다 밀리면 버리고 생략 표시를 남긴다.
