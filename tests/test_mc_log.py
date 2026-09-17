@@ -19,7 +19,7 @@ class ParserTest(unittest.TestCase):
             self.assertEqual(event.kind, "chat")
             self.assertEqual(event.name, "Steve")
             self.assertEqual(event.text, "안녕하세요")
-            self.assertEqual(event.time, "12:34")
+            self.assertEqual(event.time, "12:34:56")
 
     def test_chat_not_secure_prefix(self):
         event = self.parser.parse(VANILLA + "[Not Secure] <Alex> hi")
@@ -68,7 +68,7 @@ class ParserTest(unittest.TestCase):
     def test_styled_chat_from_async_thread(self):
         # 채팅 서식 모드가 이름 뒤에 기호(»)를 붙였고, cp949 로그에서 "?" 로 저장됨
         event = self.parser.parse(self.KO_FORGE_ASYNC + " Steve ? 아 된다")
-        self.assertEqual((event.kind, event.name, event.text, event.time), ("chat", "Steve", "아 된다", "00:10"))
+        self.assertEqual((event.kind, event.name, event.text, event.time), ("chat", "Steve", "아 된다", "00:10:01"))
         self.assertEqual(self.parser.parse(self.KO_FORGE_ASYNC + " Alex_01 » 네").text, "네")
 
     def test_styled_chat_text_keeps_question_marks(self):

@@ -11,10 +11,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import sys
+from datetime import datetime, time, timedelta
+from pathlib import Path
 from typing import Awaitable, Callable, Iterable
 
 import discord
@@ -55,6 +58,27 @@ WEBHOOK_FORBIDDEN_WORDS = ("discord", "clyde")
 LIST_RE = re.compile(r"players online:\s*(.*)$")
 NO_MENTIONS = discord.AllowedMentions.none()
 
+# /채팅날짜 설정을 재시작 후에도 유지하기 위한 파일 (git 제외)
+STATE_FILE = Path(__file__).with_name(".bridge_state.json")
+DATE_COMMAND = "채팅날짜"
+DATE_COMMAND_PAYLOAD = {
+    "name": DATE_COMMAND,
+    "type": 1,
+    "description": "#chat 메시지의 시간에 날짜(년-월-일)를 함께 표시할지 설정합니다",
+    # 채널 전체 표시 방식을 바꾸므로 서버 관리 권한이 있는 사람만 보이게 한다.
+    "default_member_permissions": str(discord.Permissions(manage_guild=True).value),
+    "dm_permission": False,
+    "options": [
+        {
+            "type": 3,
+            "name": "표시",
+            "description": "날짜 표시 켜기 또는 끄기",
+            "required": True,
+            "choices": [{"name": "켜기", "value": "on"}, {"name": "끄기", "value": "off"}],
+        }
+    ],
+}
+
 
 def _check_config() -> None:
     missing = []
@@ -80,13 +104,37 @@ def _check_config() -> None:
 # ───────────────────────── 메시지 형식 (순수 함수) ─────────────────────────
 
 
-def _clock(event: LogEvent) -> str:
-    return f"`{event.time}` " if event.time else ""
+def make_stamp(log_time: str, show_date: bool, now: datetime | None = None) -> str:
+    """메시지 앞에 붙일 시각 표시. 예) `[00:18:37]` 또는 `[2026-09-18 00:18:37]`
+
+    로그에는 시각만 믿을 만하게 남아 있어서(날짜는 OS 언어에 따라 '189월2026' 처럼 제각각)
+    날짜는 서버 PC의 오늘 날짜를 쓴다. 자정 직후에 전날 23시대 로그를 처리하는 경우는 하루를 뺀다.
+    """
+    if not log_time:
+        return ""
+    if not show_date:
+        return f"`[{log_time}]` "
+    now = now or datetime.now()
+    stamp = datetime.combine(now.date(), time.fromisoformat(log_time))
+    if stamp - now > timedelta(hours=1):
+        stamp -= timedelta(days=1)
+    return f"`[{stamp:%Y-%m-%d %H:%M:%S}]` "
 
 
-def format_event(event: LogEvent) -> str | None:
+def load_show_date() -> bool:
+    try:
+        return bool(json.loads(STATE_FILE.read_text(encoding="utf-8")).get("show_date", False))
+    except (OSError, ValueError):
+        return False
+
+
+def save_show_date(value: bool) -> None:
+    STATE_FILE.write_text(json.dumps({"show_date": value}), encoding="utf-8")
+
+
+def format_event(event: LogEvent, stamp: str = "") -> str | None:
     """채팅 외 이벤트를 디스코드 메시지로 만든다. 보낼 필요 없는 이벤트는 None."""
-    clock = _clock(event)
+    clock = stamp
     name = discord.utils.escape_markdown(event.name)
     if event.kind == "join":
         return f"{clock}➕ **{name}**님이 접속했습니다"
@@ -172,6 +220,7 @@ class BridgeBot(discord.Client):
         self.log_queue: asyncio.Queue[str] = asyncio.Queue(LOG_QUEUE_LIMIT)
         self.dropped_logs = 0
         self.logs_blocked = False
+        self.show_date = load_show_date()
 
         self._started = False
         self._tasks: list[asyncio.Task] = []
@@ -188,6 +237,7 @@ class BridgeBot(discord.Client):
         self.chat_channel = await self._resolve_channel(CHAT_CHANNEL_ID, "채팅")
         if self.chat_channel is not None:
             self.webhook = await self._resolve_webhook(self.chat_channel)
+            await self._register_date_command(self.chat_channel.guild)
         if LOGS_CHANNEL_ID:
             self.logs_channel = await self._resolve_channel(LOGS_CHANNEL_ID, "로그")
             if self.logs_channel is not None:
@@ -234,6 +284,42 @@ class BridgeBot(discord.Client):
         except discord.Forbidden:
             log.warning("웹훅 관리 권한이 없어 채팅을 봇 이름으로 보냅니다 (플레이어 아바타 없음)")
             return None
+
+    async def _register_date_command(self, guild: discord.Guild) -> None:
+        """/채팅날짜 를 등록한다.
+
+        상태 봇과 같은 봇 계정을 쓸 수 있으므로 명령어 목록을 통째로 덮어쓰는 sync 대신
+        이 명령어 하나만 추가·갱신(upsert)한다. 덮어쓰면 상대편 명령어(/status)가 지워진다.
+        """
+        try:
+            await self.http.upsert_guild_command(self.application_id, guild.id, DATE_COMMAND_PAYLOAD)
+            state = "켜짐" if self.show_date else "꺼짐"
+            log.info("/%s 명령어 등록 (현재 날짜 표시: %s)", DATE_COMMAND, state)
+        except discord.HTTPException as exc:
+            log.warning("/%s 명령어를 등록하지 못했습니다: %s", DATE_COMMAND, exc)
+
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        # 같은 봇 계정의 다른 프로그램(상태 봇) 명령어는 그쪽에서 응답하므로 건드리지 않는다.
+        if interaction.type is not discord.InteractionType.application_command:
+            return
+        data = interaction.data or {}
+        if data.get("name") != DATE_COMMAND:
+            return
+
+        perms = getattr(interaction.user, "guild_permissions", None)
+        if perms is None or not perms.manage_guild:
+            await interaction.response.send_message("서버 관리 권한이 있어야 바꿀 수 있습니다.", ephemeral=True)
+            return
+
+        value = next((opt.get("value") for opt in data.get("options", []) if opt.get("name") == "표시"), None)
+        self.show_date = value == "on"
+        save_show_date(self.show_date)
+        example = make_stamp(datetime.now().strftime("%H:%M:%S"), self.show_date).strip()
+        state = "켰습니다" if self.show_date else "껐습니다"
+        log.info("%s 님이 날짜 표시를 %s", interaction.user, state)
+        await interaction.response.send_message(
+            f"#chat 날짜 표시를 {state}. 이제 이렇게 표시됩니다: {example}", ephemeral=True
+        )
 
     def _report_logs_privacy(self) -> None:
         assert self.logs_channel is not None
@@ -285,8 +371,9 @@ class BridgeBot(discord.Client):
 
     async def _send_chat_event(self, event: LogEvent) -> None:
         assert self.chat_channel is not None
+        stamp = make_stamp(event.time, self.show_date)
         if event.kind != "chat":
-            content = format_event(event)
+            content = format_event(event, stamp)
             if content:
                 await self.chat_channel.send(content, allowed_mentions=NO_MENTIONS)
             return
@@ -295,7 +382,7 @@ class BridgeBot(discord.Client):
         if self.webhook is not None and webhook_name_allowed(event.name):
             try:
                 await self.webhook.send(
-                    f"{_clock(event)}{text}",
+                    f"{stamp}{text}",
                     username=event.name,
                     avatar_url=AVATAR_URL.format(name=event.name),
                     allowed_mentions=NO_MENTIONS,
@@ -308,7 +395,7 @@ class BridgeBot(discord.Client):
                 log.warning("웹훅이 삭제되어 다시 만듭니다")
                 self.webhook = await self._resolve_webhook(self.chat_channel)
         name = discord.utils.escape_markdown(event.name)
-        await self.chat_channel.send(f"{_clock(event)}**{name}**: {text}", allowed_mentions=NO_MENTIONS)
+        await self.chat_channel.send(f"{stamp}**{name}**: {text}", allowed_mentions=NO_MENTIONS)
 
     async def _log_sender(self) -> None:
         while True:

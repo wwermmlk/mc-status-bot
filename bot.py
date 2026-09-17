@@ -160,21 +160,35 @@ def build_embed(info: ServerInfo, headline: str | None = None) -> discord.Embed:
     return embed
 
 
+class SharedCommandTree(app_commands.CommandTree):
+    """같은 봇 계정을 쓰는 다른 프로그램(채팅 브리지)의 명령어를 오류로 기록하지 않는 트리."""
+
+    async def on_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+        if isinstance(error, app_commands.CommandNotFound):
+            return  # 다른 프로그램이 처리하는 명령어
+        await super().on_error(interaction, error)
+
+
 class StatusBot(discord.Client):
     def __init__(self) -> None:
         super().__init__(intents=discord.Intents.default())
-        self.tree = app_commands.CommandTree(self)
+        self.tree = SharedCommandTree(self)
         self.board_message: discord.Message | None = None
 
     async def setup_hook(self) -> None:
+        # tree.sync() 는 봇의 명령어 목록을 이 프로그램의 것으로 '통째로 덮어써서',
+        # 같은 봇 계정으로 채팅 브리지가 등록한 /채팅날짜 를 지워버린다.
+        # 그래서 이 프로그램의 명령어만 하나씩 추가·갱신(upsert)한다.
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
             self.tree.copy_global_to(guild=guild)
-            synced = await self.tree.sync(guild=guild)
-            log.info("길드(%s)에 슬래시 커맨드 %d개 등록 완료", GUILD_ID, len(synced))
+            for command in self.tree.get_commands(guild=guild):
+                await self.http.upsert_guild_command(self.application_id, guild.id, command.to_dict(self.tree))
+            log.info("길드(%s)에 슬래시 커맨드 등록 완료", GUILD_ID)
         else:
-            synced = await self.tree.sync()
-            log.info("글로벌 슬래시 커맨드 %d개 등록 완료 (반영까지 최대 1시간)", len(synced))
+            for command in self.tree.get_commands():
+                await self.http.upsert_global_command(self.application_id, command.to_dict(self.tree))
+            log.info("글로벌 슬래시 커맨드 등록 완료 (반영까지 최대 1시간)")
 
     async def on_ready(self) -> None:
         log.info("로그인: %s (id=%s)", self.user, self.user.id)

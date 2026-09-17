@@ -21,7 +21,7 @@ LINE_RE = re.compile(
     r"^\[(?P<time>[^\]]+)\] \[(?P<thread>[^\]/]+)/(?P<level>\w+)\]"
     r"(?: \[(?P<logger>[^\]]*)\])?: (?P<msg>.*)$"
 )
-CLOCK_RE = re.compile(r"(\d{2}):(\d{2}):\d{2}")
+CLOCK_RE = re.compile(r"\d{2}:\d{2}:\d{2}")
 
 NAME = r"(?P<name>\w{3,16})"
 # 1.19+ 에서 서명되지 않은 채팅은 앞에 [Not Secure] 가 붙는다.
@@ -67,7 +67,7 @@ IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 @dataclass
 class LogEvent:
     kind: str  # chat, join, leave, death, start, stop, other
-    time: str = ""  # "HH:MM" (로그에 적힌 서버 시각)
+    time: str = ""  # "HH:MM:SS" (로그에 적힌 서버 시각)
     name: str = ""
     text: str = ""
     raw: str = ""
@@ -95,7 +95,7 @@ class LogParser:
             return LogEvent("other", raw=line)
 
         clock = CLOCK_RE.search(match["time"])
-        time = f"{clock[1]}:{clock[2]}" if clock else ""
+        time = clock[0] if clock else ""
         thread, msg = match["thread"], match["msg"]
 
         if chat := self._match_chat(thread, match["logger"] or "", msg):
