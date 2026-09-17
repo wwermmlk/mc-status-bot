@@ -40,6 +40,10 @@ class FormatEventTest(unittest.TestCase):
     def test_underscore_names_do_not_become_italic(self):
         self.assertIn(r"**Steve\_\_1**", format_event(LogEvent("join", name="Steve__1"), STAMP))
 
+    def test_discord_echo_line(self):
+        message = format_event(LogEvent("discord", name="서버장", text="점검 *10분* 뒤"), STAMP)
+        self.assertEqual(message, r"`[12:34:56]` [Discord] 서버장: 점검 \*10분\* 뒤")
+
     def test_death_text_is_escaped(self):
         message = format_event(LogEvent("death", name="Steve", text="Steve was slain by *Boss*"), STAMP)
         self.assertEqual(message, r"`[12:34:56]` ☠️ Steve was slain by \*Boss\*")

@@ -26,7 +26,7 @@ import discord
 from dotenv import load_dotenv
 
 from mc_log import LogEvent, LogParser, LogTailer, mask_ips
-from mc_text import build_tellraw
+from mc_text import HEX_COLOR_RE, build_game_chat
 from rcon import Rcon, RconError
 
 load_dotenv()
@@ -45,6 +45,8 @@ RCON_HOST = os.getenv("RCON_HOST", "127.0.0.1").strip()
 RCON_PORT = int(os.getenv("RCON_PORT", "25575"))
 RCON_PASSWORD = os.getenv("RCON_PASSWORD", "")
 LOG_MASK_IPS = os.getenv("LOG_MASK_IPS", "true").strip().lower() != "false"
+# 디스코드 서버 소유자가 #chat 에 쓴 메시지는 게임에서 닉네임을 이 색으로 표시한다. (기본: 마인크래프트 gold)
+OWNER_NAME_COLOR = os.getenv("OWNER_NAME_COLOR", "").strip() or "#FFAA00"
 LOG_FLUSH_SECONDS = max(1.0, float(os.getenv("LOG_FLUSH_SECONDS", "2")))
 
 WEBHOOK_NAME = "MC Chat Bridge"
@@ -95,6 +97,8 @@ def _check_config() -> None:
         missing.append("RCON_PASSWORD (server.properties의 rcon.password)")
     if missing:
         _fatal("[설정 오류] .env 파일에 다음 값이 필요합니다:", *(f"  - {item}" for item in missing))
+    if not HEX_COLOR_RE.match(OWNER_NAME_COLOR):
+        _fatal(f"[설정 오류] OWNER_NAME_COLOR 는 #RRGGBB 형식이어야 합니다 (예: #FFAA00): {OWNER_NAME_COLOR}")
     if not os.path.isdir(os.path.dirname(os.path.abspath(MC_LOG_PATH))):
         _fatal(
             f"[설정 오류] 로그 폴더가 없습니다: {MC_LOG_PATH}",
@@ -186,6 +190,9 @@ def format_event(event: LogEvent, stamp: str = "") -> str | None:
         return f"{clock}✅ 서버가 열렸습니다"
     if event.kind == "stop":
         return f"{clock}⛔ 서버가 닫혔습니다"
+    if event.kind == "discord":
+        # 디스코드 메시지가 게임 채팅에 실제로 표시된 모습 그대로 (잘림·변환 포함)
+        return f"{clock}[Discord] {name}: {discord.utils.escape_markdown(event.text)}"
     return None
 
 
@@ -488,14 +495,26 @@ class BridgeBot(discord.Client):
         if not text:
             return
 
+        # 서버 소유자는 계정 ID로 판별한다. 닉네임을 똑같이 바꿔도 흉내 낼 수 없다.
+        is_owner = message.guild is not None and message.author.id == message.guild.owner_id
+        chat = build_game_chat(message.author.display_name, text, OWNER_NAME_COLOR if is_owner else "white")
         try:
-            await self.rcon.command(build_tellraw(message.author.display_name, text))
+            await self.rcon.command(chat.command)
         except RconError as exc:
             log.warning("게임으로 메시지를 전달하지 못했습니다: %s", exc)
             try:
                 await message.add_reaction("❌")
             except discord.HTTPException:
                 pass
+            return
+
+        # 게임에 실제로 표시된 내용(잘림·이모지 변환 포함)을 #chat 에도 올려 전달을 눈으로 확인하게 한다.
+        # 채팅 큐를 거쳐 게임 채팅·접속 알림과 순서가 섞이지 않게 한다.
+        echo = LogEvent("discord", datetime.now().strftime("%H:%M:%S"), chat.name, chat.message)
+        try:
+            self.chat_queue.put_nowait(echo)
+        except asyncio.QueueFull:
+            log.warning("채팅 전송이 밀려 디스코드 메시지 확인 줄을 건너뜁니다")
 
 
 if __name__ == "__main__":

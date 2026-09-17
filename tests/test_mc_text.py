@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from mc_text import DISCORD_COLOR, MAX_COMMAND_BYTES, build_tellraw, clean_text
+from mc_text import DISCORD_COLOR, MAX_COMMAND_BYTES, build_game_chat, build_tellraw, clean_text
 
 PREFIX = "tellraw @a "
 
@@ -57,6 +57,29 @@ class TellrawTest(unittest.TestCase):
 
     def test_short_message_not_truncated(self):
         self.assertNotIn("…", build_tellraw("a", "b" * 200))
+
+    def test_default_name_color_is_white(self):
+        self.assertEqual(components(build_tellraw("디코유저", "hi"))[2]["color"], "white")
+
+    def test_owner_name_color_only_changes_name(self):
+        parts = components(build_tellraw("서버장", "점검 10분 뒤", name_color="#FFAA00"))
+        self.assertEqual(parts[1]["color"], DISCORD_COLOR)
+        self.assertEqual(parts[2], {"text": "서버장", "color": "#FFAA00"})
+        self.assertEqual(parts[3]["color"], "white")  # 메시지 본문은 그대로 흰색
+
+    def test_invalid_color_rejected(self):
+        for bad in ("gold", "#FFF", '#FFAA00"}', "red; op me"):
+            with self.assertRaises(ValueError, msg=bad):
+                build_game_chat("a", "b", bad)
+
+    def test_echo_text_matches_what_game_shows(self):
+        # 디스코드 확인 줄에 쓰는 값이 게임으로 보낸 명령 속 텍스트와 정확히 같아야 한다
+        for name, msg in [("디코유저", "  안녕\n<:pog:1>  "), ("x", "가" * 1000), ("§c관리자", "§4공지")]:
+            chat = build_game_chat(name, msg, "#FFAA00")
+            parts = components(chat.command)
+            self.assertEqual(parts[2]["text"], chat.name)
+            self.assertEqual(parts[3]["text"], ": " + chat.message)
+        self.assertTrue(build_game_chat("x", "가" * 1000).message.endswith("…"))
 
     def test_empty_name_fallback(self):
         self.assertEqual(components(build_tellraw("\n", "hi"))[2]["text"], "알 수 없음")
