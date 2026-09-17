@@ -15,8 +15,10 @@ import json
 import logging
 import os
 import re
+import socket
 import sys
 from datetime import datetime, time, timedelta
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Awaitable, Callable, Iterable
 
@@ -29,12 +31,11 @@ from rcon import Rcon, RconError
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
 log = logging.getLogger("mc-bridge")
+LOG_FILE = Path(__file__).with_name("bridge.log")
+
+# 두 개가 동시에 돌면 모든 채팅이 두 번씩 올라간다. 이 포트를 잡고 있는 동안은 추가 실행을 막는다.
+SINGLE_INSTANCE_PORT = 47651
 
 TOKEN = os.getenv("BRIDGE_DISCORD_TOKEN", "").strip()
 CHAT_CHANNEL_ID = os.getenv("BRIDGE_CHAT_CHANNEL_ID", "").strip()
@@ -93,14 +94,51 @@ def _check_config() -> None:
     if not RCON_PASSWORD:
         missing.append("RCON_PASSWORD (server.properties의 rcon.password)")
     if missing:
-        print("[설정 오류] .env 파일에 다음 값이 필요합니다:", file=sys.stderr)
-        for item in missing:
-            print(f"  - {item}", file=sys.stderr)
-        raise SystemExit(1)
+        _fatal("[설정 오류] .env 파일에 다음 값이 필요합니다:", *(f"  - {item}" for item in missing))
     if not os.path.isdir(os.path.dirname(os.path.abspath(MC_LOG_PATH))):
-        print(f"[설정 오류] 로그 폴더가 없습니다: {MC_LOG_PATH}", file=sys.stderr)
-        print("  마인크래프트 서버 폴더 안의 logs\\latest.log 경로인지 확인하세요.", file=sys.stderr)
-        raise SystemExit(1)
+        _fatal(
+            f"[설정 오류] 로그 폴더가 없습니다: {MC_LOG_PATH}",
+            "  마인크래프트 서버 폴더 안의 logs\\latest.log 경로인지 확인하세요.",
+        )
+
+
+def _setup_logging() -> None:
+    """실행할 때만 호출한다. 모듈을 불러오기만 해도 설정하면 테스트 기록이 실제 로그 파일에 섞인다.
+
+    창 없이(pythonw) 백그라운드로 돌면 실행 기록을 볼 곳이 없으므로 파일에도 남긴다. (1MB × 4개 순환)
+    """
+    handlers: list[logging.Handler] = [
+        RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=3, encoding="utf-8", delay=True)
+    ]
+    if sys.stderr is not None:  # pythonw 로 실행하면 콘솔이 없다
+        handlers.append(logging.StreamHandler())
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=handlers,
+    )
+
+
+def _fatal(*lines: str) -> None:
+    """오류를 남기고 종료한다. 창 없이 실행 중이면 print 는 보이지 않으므로 로그 파일에 기록한다."""
+    for line in lines:
+        log.error(line)
+    raise SystemExit(1)
+
+
+def _acquire_single_instance() -> socket.socket:
+    """이미 브리지가 실행 중이면 종료한다. 반환된 소켓을 프로그램이 끝날 때까지 들고 있어야 한다."""
+    lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        lock.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
+    except OSError:
+        lock.close()
+        _fatal(
+            "[중복 실행] 브리지가 이미 실행 중입니다. 두 개가 돌면 채팅이 두 번씩 올라가서 이번 실행은 종료합니다.",
+            "  백그라운드 실행을 멈추려면 작업 스케줄러에서 mc-bridge 작업을 '끝내기' 하세요.",
+        )
+    return lock
 
 
 # ───────────────────────── 메시지 형식 (순수 함수) ─────────────────────────
@@ -461,16 +499,18 @@ class BridgeBot(discord.Client):
 
 
 if __name__ == "__main__":
+    _setup_logging()
     _check_config()
+    _instance_lock = _acquire_single_instance()
     try:
         BridgeBot().run(TOKEN, log_handler=None)
     except discord.LoginFailure:
-        print("[오류] 브리지 봇 토큰이 올바르지 않습니다. .env의 BRIDGE_DISCORD_TOKEN을 확인하세요.", file=sys.stderr)
-        raise SystemExit(1)
+        _fatal("[오류] 브리지 봇 토큰이 올바르지 않습니다. .env의 BRIDGE_DISCORD_TOKEN을 확인하세요.")
     except discord.PrivilegedIntentsRequired:
-        print(
-            "[오류] 디스코드 개발자 포털 > Bot 에서 'MESSAGE CONTENT INTENT' 를 켜주세요.\n"
+        _fatal(
+            "[오류] 디스코드 개발자 포털 > Bot 에서 'MESSAGE CONTENT INTENT' 를 켜주세요.",
             "       이 권한이 없으면 디스코드 메시지 내용을 읽을 수 없습니다.",
-            file=sys.stderr,
         )
-        raise SystemExit(1)
+    except Exception:
+        log.exception("브리지가 예기치 못한 오류로 종료됩니다")
+        raise

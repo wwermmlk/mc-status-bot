@@ -5,3 +5,4 @@ venv/
 .venv/
 .bot_state.json
 .bridge_state.json
+bridge.log*
