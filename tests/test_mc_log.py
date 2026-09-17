@@ -61,6 +61,39 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(self.parser.parse("[12:34:56] [Worker-Main-1/INFO]: <Steve> fake").kind, "other")
         self.assertEqual(self.parser.parse("\tat java.base/java.lang.Thread.run(Thread.java:833)").kind, "other")
 
+    # 실제 운영 서버(Forge 모드팩, 한국어 Windows)에서 찍힌 형식. 이름만 바꿈.
+    KO_FORGE_ASYNC = "[189월2026 00:10:01.861] [ForkJoinPool.commonPool-worker-1/INFO] [net.minecraft.server.MinecraftServer/]: "
+    KO_FORGE_SERVER = "[189월2026 00:11:05.217] [Server thread/INFO] [net.minecraft.server.MinecraftServer/]: "
+
+    def test_styled_chat_from_async_thread(self):
+        # 채팅 서식 모드가 이름 뒤에 기호(»)를 붙였고, cp949 로그에서 "?" 로 저장됨
+        event = self.parser.parse(self.KO_FORGE_ASYNC + " Steve ? 아 된다")
+        self.assertEqual((event.kind, event.name, event.text, event.time), ("chat", "Steve", "아 된다", "00:10"))
+        self.assertEqual(self.parser.parse(self.KO_FORGE_ASYNC + " Alex_01 » 네").text, "네")
+
+    def test_styled_chat_text_keeps_question_marks(self):
+        event = self.parser.parse(self.KO_FORGE_ASYNC + " Steve ? 이거 쓰고 다시 받을수 잇을까요?")
+        self.assertEqual(event.text, "이거 쓰고 다시 받을수 잇을까요?")
+
+    def test_real_server_lines_that_are_not_chat(self):
+        self.parser.parse(FORGE + "Steve joined the game")
+        for msg in (
+            "Can't keep up! Is the server overloaded? Running 2005ms or 40 ticks behind",
+            "[Steve: Killed Steve]",
+            "Steve has reached the goal [Sky's the Limit]",
+            "There are 6 of a max of 20 players online: Steve, Alex",
+        ):
+            self.assertNotEqual(self.parser.parse(self.KO_FORGE_SERVER + msg).kind, "chat", msg)
+
+    def test_styled_chat_only_from_minecraft_server_logger(self):
+        other_mod = "[189월2026 00:10:01.861] [ForkJoinPool.commonPool-worker-1/INFO] [SomeMod/]: "
+        self.assertEqual(self.parser.parse(other_mod + " Steve ? 가짜").kind, "other")
+
+    def test_kill_command_death(self):
+        self.parser.parse(FORGE + "Steve joined the game")
+        event = self.parser.parse(self.KO_FORGE_SERVER + "Steve was killed")
+        self.assertEqual((event.kind, event.text), ("death", "Steve was killed"))
+
     def test_mask_ips(self):
         # 203.0.113.0/24 는 문서·예시용으로 예약된 IP 대역
         line = FORGE + "Steve[/203.0.113.45:51234] logged in with entity id 123 at (1.5, 64.0, -3.2)"

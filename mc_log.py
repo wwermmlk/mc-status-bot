@@ -26,6 +26,11 @@ CLOCK_RE = re.compile(r"(\d{2}):(\d{2}):\d{2}")
 NAME = r"(?P<name>\w{3,16})"
 # 1.19+ 에서 서명되지 않은 채팅은 앞에 [Not Secure] 가 붙는다.
 CHAT_RE = re.compile(r"^(?:\[Not Secure\] )?<(?P<name>[^>]+)> (?P<text>.*)$")
+# 채팅 서식을 바꾸는 모드팩: " Steve » 안녕" 처럼 이름 뒤에 기호 하나가 붙는다.
+# 서버가 로그를 cp949로 쓰면 cp949에 없는 기호(» 등)는 "?" 로 저장된다.
+# 형식이 느슨하므로 MinecraftServer 로거가 남긴 줄에만 적용한다.
+STYLED_CHAT_RE = re.compile(rf"^\s*{NAME} [^\w\s] (?P<text>.*)$")
+CHAT_LOGGER = "MinecraftServer"
 JOIN_RE = re.compile(rf"^{NAME} joined the game$")
 LEAVE_RE = re.compile(rf"^{NAME} left the game$")
 DEATH_NAME_RE = re.compile(rf"^{NAME} ")
@@ -35,7 +40,8 @@ STOP_RE = re.compile(r"^Stopping server$")
 # 바닐라 1.20 사망 메시지(death.*)에서 이름 뒤에 오는 문구.
 DEATH_PHRASES = (
     " was slain by", " was shot by", " was fireballed by", " was pummeled by",
-    " was killed by", " was killed trying to hurt", " was blown up by", " blew up",
+    # " was killed" 단독은 /kill 로 죽었을 때 (by·trying to hurt 변형도 함께 포함)
+    " was killed", " was blown up by", " blew up",
     " was squashed by", " was squished too much", " was pricked to death",
     " walked into a cactus", " was poked to death by a sweet berry bush",
     " drowned", " experienced kinetic energy", " hit the ground too hard",
@@ -85,17 +91,21 @@ class LogParser:
 
     def parse(self, line: str) -> LogEvent:
         match = LINE_RE.match(line)
-        if not match or match["thread"] != "Server thread":
+        if not match:
             return LogEvent("other", raw=line)
 
         clock = CLOCK_RE.search(match["time"])
         time = f"{clock[1]}:{clock[2]}" if clock else ""
-        msg = match["msg"]
+        thread, msg = match["thread"], match["msg"]
 
-        if m := CHAT_RE.match(msg):
+        if chat := self._match_chat(thread, match["logger"] or "", msg):
             # 채팅을 쳤다면 접속 중인 게 확실하다. 봇 시작 전부터 있던 사람도 여기서 채워진다.
-            self.online.add(m["name"])
-            return LogEvent("chat", time, m["name"], m["text"], line)
+            self.online.add(chat["name"])
+            return LogEvent("chat", time, chat["name"], chat["text"], line)
+
+        # 채팅 외 이벤트는 게임 로직을 처리하는 Server thread 에서만 나온다.
+        if thread != "Server thread":
+            return LogEvent("other", time, raw=line)
         if m := JOIN_RE.match(msg):
             self.online.add(m["name"])
             return LogEvent("join", time, m["name"], raw=line)
@@ -113,6 +123,17 @@ class LogParser:
             if rest.startswith(DEATH_PHRASES):
                 return LogEvent("death", time, m["name"], msg, line)
         return LogEvent("other", time, raw=line)
+
+    @staticmethod
+    def _match_chat(thread: str, logger: str, msg: str) -> re.Match | None:
+        # 채팅은 서버/모드에 따라 Server thread 가 아닌 비동기 스레드에서 기록되기도 한다.
+        if not (thread == "Server thread" or thread.startswith(("ForkJoinPool", "Async Chat"))):
+            return None
+        if m := CHAT_RE.match(msg):
+            return m
+        if CHAT_LOGGER in logger:
+            return STYLED_CHAT_RE.match(msg)
+        return None
 
 
 def _decode(raw: bytes) -> str:
