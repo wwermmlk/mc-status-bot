@@ -60,7 +60,8 @@ class EmbedTest(unittest.TestCase):
 
         for host in ("127.0.0.1", "192.168.0.21", "10.0.0.5", "100.101.102.103"):
             self.assertTrue(is_private_host(host), host)
-        for host in ("203.0.113.10", "8.8.8.8", "example.com"):
+        # 203.0.113.x 같은 문서용 대역은 파이썬이 사설망으로 분류하므로 공인 주소로 확인한다
+        for host in ("8.8.8.8", "93.184.216.34", "example.com"):
             self.assertFalse(is_private_host(host), host)
 
 
