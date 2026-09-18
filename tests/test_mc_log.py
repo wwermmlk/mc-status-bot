@@ -139,6 +139,25 @@ class TailerTest(unittest.TestCase):
 
         self.assertEqual(asyncio.run(scenario()), ["새 줄 한글", "partial", "after restart"])
 
+    def test_warns_when_log_file_missing_then_recovers(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "latest.log")
+                tailer = LogTailer(path, poll_seconds=0.02)
+                tailer.MISSING_WARN_SECONDS = 0.05
+                lines = tailer.lines()
+                task = asyncio.ensure_future(asyncio.wait_for(anext(lines), 2))
+                await asyncio.sleep(0.3)
+                with open(path, "wb") as f:
+                    f.write(b"back\n")
+                return await task
+
+        with self.assertLogs("mc-bridge", level="INFO") as captured:
+            self.assertEqual(asyncio.run(scenario()), "back")
+        text = "\n".join(captured.output)
+        self.assertIn("MC_LOG_PATH", text)
+        self.assertIn("다시 찾았습니다", text)
+
     def test_cp949_fallback(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as tmp:

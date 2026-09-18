@@ -152,6 +152,8 @@ class LogTailer:
     """
 
     READ_CHUNK = 1 << 20
+    # 서버가 꺼져 있으면 로그 파일이 잠깐 사라질 수 있다. 이보다 오래 없으면 경로 문제로 보고 알린다.
+    MISSING_WARN_SECONDS = 60.0
 
     def __init__(self, path: str, poll_seconds: float = 0.5) -> None:
         self.path = path
@@ -164,14 +166,30 @@ class LogTailer:
         # 봇 시작 시점에 이미 있던 로그는 건너뛴다(과거 로그 폭주 방지).
         # 반대로 시작 시점에 파일이 없었다면, 새로 생긴 파일은 처음부터 읽는다.
         skip_existing = True
+        missing_since: float | None = None
+        warned_missing = False
 
         while True:
             try:
                 stat = os.stat(self.path)
             except FileNotFoundError:
                 skip_existing = False
+                now = asyncio.get_running_loop().time()
+                missing_since = now if missing_since is None else missing_since
+                if not warned_missing and now - missing_since >= self.MISSING_WARN_SECONDS:
+                    # 경로가 틀리면 조용히 기다리기만 해서 원인을 못 찾는다.
+                    warned_missing = True
+                    log.error(
+                        "로그 파일이 %.0f초째 없습니다: %s — 서버가 꺼져 있거나 .env의 MC_LOG_PATH 가 틀렸습니다",
+                        self.MISSING_WARN_SECONDS,
+                        self.path,
+                    )
                 await asyncio.sleep(self.poll_seconds)
                 continue
+
+            if warned_missing:
+                log.info("로그 파일을 다시 찾았습니다: %s", self.path)
+            missing_since, warned_missing = None, False
 
             if file_id is None:
                 file_id = stat.st_ino
