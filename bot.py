@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -19,6 +20,8 @@ from discord.ext import tasks
 from dotenv import load_dotenv
 
 from mc_query import ServerInfo, fetch_server_info
+from mc_tps import TpsInfo, fetch_tps
+from rcon import Rcon
 from site_info import HeroTextCache
 
 load_dotenv()
@@ -46,8 +49,16 @@ SITE_LINK_TEXT = os.getenv("SITE_LINK_TEXT", "🏡 서버 홈페이지").strip()
 # 봇이 돌고 있는 위치. 핑이 어디서 잰 값인지 밝히는 데 쓴다.
 BOT_LOCATION = os.getenv("BOT_LOCATION", "오사카").strip()
 
+# TPS 조회용 RCON. 비밀번호를 넣으면 켜진다.
+# RCON은 비밀번호를 평문으로 보내므로 인터넷에 열지 말고, Tailscale 같은 사설망 주소만 쓴다.
+RCON_HOST = os.getenv("RCON_HOST", "").strip()
+RCON_PORT = int(os.getenv("RCON_PORT", "25575"))
+RCON_PASSWORD = os.getenv("RCON_PASSWORD", "")
+TPS_ENABLED = bool(RCON_HOST and RCON_PASSWORD)
+
 # 홈페이지 대표 문구. 임베드 설명으로 쓰고, 못 가져오면 서버 MOTD로 돌아간다.
 hero_text = HeroTextCache(SITE_URL, SITE_CACHE_SECONDS)
+tps_rcon = Rcon(RCON_HOST, RCON_PORT, RCON_PASSWORD) if TPS_ENABLED else None
 
 # 디스코드 임베드 필드 1개는 1024자 제한이 있으므로 표시 인원을 제한한다.
 MAX_SHOWN_PLAYERS = 40
@@ -100,7 +111,25 @@ def _describe(headline: str | None, fallback: str | None) -> str | None:
     return "\n".join(lines) or None
 
 
-def build_embed(info: ServerInfo, headline: str | None = None) -> discord.Embed:
+def is_private_host(host: str) -> bool:
+    """사설망 주소인지 본다. Tailscale은 100.64.0.0/10(CGNAT) 대역을 쓴다."""
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False  # 도메인 이름은 확인할 수 없으므로 안전한 쪽으로 본다
+    return address.is_private or address.is_loopback or address in ipaddress.ip_network("100.64.0.0/10")
+
+
+def format_tps(tps: TpsInfo) -> str:
+    """TPS를 신호등처럼 보여준다. 20이 정상이고 낮을수록 서버가 버거운 상태다."""
+    mark = "🟢" if tps.tps >= 19.5 else ("🟡" if tps.tps >= 15 else "🔴")
+    tick = f" ({tps.tick_ms:.1f} ms/틱)" if tps.tick_ms is not None else ""
+    return f"{mark} {tps.tps:.1f} / 20{tick}"
+
+
+def build_embed(
+    info: ServerInfo, headline: str | None = None, tps: TpsInfo | None = None
+) -> discord.Embed:
     """headline 이 있으면 설명으로 쓰고, 없으면 서버 MOTD로 돌아간다."""
     address = f"{MC_HOST}:{MC_PORT}" if MC_PORT != 25565 else MC_HOST
     now = datetime.now(timezone.utc)
@@ -138,6 +167,8 @@ def build_embed(info: ServerInfo, headline: str | None = None) -> discord.Embed:
     # 오해하기 쉬워서 이름과 푸터로 분명히 밝힌다.
     embed.add_field(name="핑", value=f"{info.latency_ms} ms", inline=True)
     embed.add_field(name="마지막 갱신", value=updated, inline=True)
+    if tps is not None:
+        embed.add_field(name="서버 성능 (TPS)", value=format_tps(tps), inline=True)
 
     names = info.player_names
     shown = names[:MAX_SHOWN_PLAYERS]
@@ -193,6 +224,13 @@ class StatusBot(discord.Client):
     async def on_ready(self) -> None:
         log.info("로그인: %s (id=%s)", self.user, self.user.id)
         log.info("대상 서버: %s:%s (query %s)", MC_HOST, MC_PORT, MC_QUERY_PORT)
+        log.info("TPS 표시: %s", f"켜짐 (RCON {RCON_HOST}:{RCON_PORT})" if TPS_ENABLED else "꺼짐")
+        if TPS_ENABLED and not is_private_host(RCON_HOST):
+            log.warning(
+                "RCON_HOST(%s)가 사설망 주소가 아닙니다. RCON은 비밀번호를 평문으로 보내므로 "
+                "Tailscale 등 사설망 주소(100.x, 10.x, 192.168.x)를 쓰세요.",
+                RCON_HOST,
+            )
         await self.sync_description()
         if not live_board.is_running():
             live_board.start()
@@ -268,14 +306,22 @@ async def live_board() -> None:
         log.exception("갱신 중 예기치 못한 오류 (다음 주기에 재시도합니다)")
 
 
+async def current_tps(online: bool) -> TpsInfo | None:
+    """TPS를 조회한다. RCON 설정이 없거나 서버가 꺼져 있으면 건너뛴다."""
+    if tps_rcon is None or not online:
+        return None
+    return await fetch_tps(tps_rcon)
+
+
 async def _update_once() -> None:
     info = await fetch_server_info(MC_HOST, MC_PORT, MC_QUERY_PORT)
     headline = await hero_text.get()
+    tps = await current_tps(info.online)
 
     message = await client.resolve_board_message()
     if message is not None:
         try:
-            await message.edit(embed=build_embed(info, headline))
+            await message.edit(embed=build_embed(info, headline, tps))
         except discord.NotFound:
             # 메시지가 지워졌으면 다음 주기에 새로 만든다.
             client.board_message = None
@@ -308,7 +354,8 @@ async def status_command(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
     info = await fetch_server_info(MC_HOST, MC_PORT, MC_QUERY_PORT)
     headline = await hero_text.get()
-    await interaction.followup.send(embed=build_embed(info, headline), ephemeral=True)
+    tps = await current_tps(info.online)
+    await interaction.followup.send(embed=build_embed(info, headline, tps), ephemeral=True)
 
 
 if __name__ == "__main__":

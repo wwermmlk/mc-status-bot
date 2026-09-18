@@ -28,6 +28,7 @@
 
 ### 상태 봇
 
+- **서버 성능(TPS)** — Tailscale 사설망을 거친 RCON으로 조회해 🟢 20.0 / 20 (4.0 ms/틱) 형태로 표시 (선택)
 - **실시간 상태 보드** — 채널에 올린 메시지 하나를 주기적으로 수정. 봇을 재시작해도 같은 메시지를 이어서 갱신
 - **접속자 전체 닉네임** — Query 프로토콜로 전원 조회, 불가능하면 Status Ping으로 자동 전환
 - **익명 플레이어 처리** — 서버 목록 표시를 끈 플레이어를 정확한 인원수로 표시
@@ -139,7 +140,14 @@ Query 결과의 속성 이름을 잘못 쓰고 있었는데(`players.names` → 
 
 봇이 외부 클라우드에 있어 RCON 포트를 인터넷에 열어야 했기 때문에, 지표 하나를 위해 감수할 위험이 아니라고 판단했습니다.
 대신 기존에 `응답 속도`로 표시하던 값이 **서버 성능이 아니라 네트워크 왕복 시간**이라는 점을 필드 이름(`핑`)과
-푸터에 명시해 오해를 막았습니다. 필요해지면 Tailscale 같은 암호화 사설망을 거쳐 RCON을 쓰는 방향을 검토할 예정입니다.
+푸터에 명시해 오해를 막았습니다.
+
+**이후 Tailscale로 해결했습니다.** 두 기기만 연결되는 암호화 사설망을 깔면 RCON 포트를 인터넷에 열지 않고도
+클라우드의 상태 봇이 서버 PC에 접속할 수 있습니다. 포트포워딩도, 공인 IP 노출도 없고 평문 비밀번호는 터널 안에서만 오갑니다.
+`RCON_HOST`에 공인 IP를 넣는 실수를 막기 위해, 사설망 대역(`100.64.0.0/10`, `10.x`, `192.168.x`, `127.x`)이 아니면 시작할 때 경고를 남깁니다.
+
+TPS 조회 명령과 출력은 서버 종류마다 다릅니다. Forge는 `forge tps`로 `Overall: Mean tick time: 4.031 ms. Mean TPS: 20.000`을,
+Paper 계열은 `tps`로 색 코드가 섞인 `§6TPS from last 1m, 5m, 15m: §a20.0`을 돌려줍니다. 두 형식을 모두 파싱하고 순서대로 시도합니다.
 
 ### 4. API가 없는 홈페이지에서 문구 가져오기
 
@@ -303,6 +311,23 @@ python diag.py       # 봇의 채널 권한 점검
 | `SITE_LINK_TEXT` | | 임베드 링크 문구, 기본 `🏡 서버 홈페이지` |
 | `SITE_CACHE_SECONDS` | | 홈페이지 캐시 시간, 기본 `600` |
 | `BOT_DESCRIPTION` | | 봇 프로필 설명. 비우면 변경하지 않음 |
+| `RCON_HOST` / `RCON_PORT` / `RCON_PASSWORD` | | 채우면 TPS 표시. **사설망 주소만** 사용 |
+
+### TPS 표시 (선택)
+
+상태 봇이 서버 PC의 RCON에 접속해야 합니다. 포트를 인터넷에 열지 말고 [Tailscale](https://tailscale.com)로 두 기기를 잇습니다.
+
+1. 서버 PC와 클라우드 서버 양쪽에 Tailscale 설치 후 같은 계정으로 로그인
+2. 서버 PC의 Tailscale 주소(`100.x.x.x`) 확인: `tailscale ip -4`
+3. 서버 PC 방화벽에서 Tailscale 대역만 허용
+
+```powershell
+New-NetFirewallRule -DisplayName "Minecraft RCON (Tailscale)" -Direction Inbound -Protocol TCP -LocalPort 25575 -RemoteAddress 100.64.0.0/10 -Action Allow
+```
+
+4. 클라우드의 `.env`에 `RCON_HOST=100.x.x.x`, `RCON_PORT=25575`, `RCON_PASSWORD=<server.properties의 값>` 추가
+
+연결만 따로 확인하려면 `python mc_tps.py` 를 실행합니다.
 
 ## 배포 (Oracle Cloud Always Free)
 
@@ -357,6 +382,13 @@ rcon.password=충분히-긴-무작위-문자열
 ```
 
 > ⚠️ 공유기에서 **25575 포트를 포트포워딩하지 마세요.** 브리지는 같은 PC에서만 접속합니다.
+
+채팅의 이모지·특수기호가 `?`로 깨진다면 서버가 로그를 OS 기본 인코딩으로 쓰고 있는 것입니다.
+서버 실행 옵션(Forge는 `user_jvm_args.txt`)에 아래를 추가하면 로그가 UTF-8로 기록됩니다.
+
+```
+-Dfile.encoding=UTF-8
+```
 
 ### 4. 실행
 
